@@ -1,2 +1,4 @@
 # Please read me first for contributor
-# test
+1. Sylvia Canopy
+2. Rumi
+3. Faiz
