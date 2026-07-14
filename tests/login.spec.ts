@@ -1,11 +1,27 @@
 import { test, expect } from '@playwright/test';
+import { LoginPage } from '../pages/login.page';
+
+test('User successfully login using valid credential', async ({ page }) => {
+
+  // Precondition
+  const loginPage = new LoginPage(page)
+  await page.goto('https://www.emra.chat/login');
+
+  //Step
+  await loginPage.loginAs("testingemrachat@yopmail.com", "tester!23")
+
+  // Expected Result
+  await expect(page.getByRole('button', { name: 'Tester emra' })).toBeVisible();
+});
 
 test('User unsuccessfully login using invalid credential', async ({ page }) => {
+  // Precondition
+  const loginPage = new LoginPage(page)
   await page.goto('https://www.emra.chat/login');
-  await page.getByRole('textbox', { name: 'Email' }).click();
-  await page.getByRole('textbox', { name: 'Email' }).fill('testingemrachat@gmail.com');
-  await page.getByRole('textbox', { name: 'Password' }).click();
-  await page.getByRole('textbox', { name: 'Password' }).fill('Tester!3');
-  await page.getByRole('button', { name: 'Sign In' }).click();
+
+  //Step
+  await loginPage.loginAs("testingemrachat@yopmail.com", "tester!12345")
+
+  // Expected Result
   await expect(page.getByText('Invalid credentials')).toBeVisible();
 });
