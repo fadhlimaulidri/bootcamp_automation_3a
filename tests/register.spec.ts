@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test('User unsuccessfully register using existing email @negative @register', async ({ page }) => {
+test('User unsuccessfully register using existing email @negative @register @p1 @smoke ', async ({ page }) => {
   await page.goto('https://www.emra.chat/login');
   await page.getByRole('link', { name: 'Sign up' }).click();
   await page.getByRole('textbox', { name: 'Email' }).click();

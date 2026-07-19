@@ -1,0 +1,11 @@
+{
+  "admin_user": {
+    "email": "sdet_admin@yopmail.com",
+    "password": "Tester!23",
+    "full_name": "Val Miller"
+  },
+  "regular_user": {
+    "email": "testingemrachat@yopmail.com",
+    "password": "tester!12345"
+  }
+}

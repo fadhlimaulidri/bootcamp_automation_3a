@@ -1,0 +1,3 @@
+Tolong panggil get_test_case dari AgentQ untuk membaca isi Test Case dengan ID TC-10. 
+Pahami langkah-langkah pengujian (steps) dan expected result-nya, kemudian jalankan test nya menggunakan playwright mcp dengan
+buatkan automation test Playwright (.spec.ts) yang utuh beserta POM lamannya."
