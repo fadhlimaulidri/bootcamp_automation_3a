@@ -1,8 +1,25 @@
 import { test, expect } from '@playwright/test';
-import { LoginPage } from '../pages/login.page';
+import { LoginPage } from '../pages/login/login.page';
 import dataUser from '../data/user.json'
+import { pushTestResultToAgentQ } from '../helper/agentq-helper';
 
-test('TC-1 User successfully login using valid credential @login @positive @p0 @smoke', async ({ page }) => {
+
+  test.describe('Authentication Tests', () => {
+  let testStartTime: number;
+
+  test.beforeEach(async () => {
+    testStartTime = Date.now();
+  });
+
+  test.afterEach(async ({}, testInfo) => {
+    const executionTime = Date.now() - testStartTime;
+    const errorDetails = testInfo.errors.map(e => e.message).join('; ');
+    const title = testInfo.title ?? 'Unknown test';
+    const status = testInfo.status ?? 'unknown';
+    await pushTestResultToAgentQ(title, status, executionTime, errorDetails);
+  });
+
+test('1 User successfully login using valid credential @login @positive @p0 @smoke', async ({ page }) => {
 
   // Precondition
   const email = dataUser['regular_user']['email']
@@ -27,4 +44,6 @@ test('User unsuccessfully login using invalid credential @login @negative @p1', 
 
   // Expected Result
   await expect(page.getByText('Invalid credentials')).toBeVisible();
+});
+
 });
