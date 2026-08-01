@@ -27,6 +27,14 @@ jobs:
        run: npx playwright test
        env:
          PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+         BASE_URL: https://www.emra.chat
+         WORKER: 3
+         RETRY: 0
+         HEADLESS: true
+         AGENTQ_PROJECT_ID: ${{ vars.AGENTQ_PROJECT_ID }}
+         AGENTQ_TESTRUN_ID: ${{ vars.AGENTQ_TESTRUN_ID }}
+         AGENTQ_EMAIL: ${{ vars.AGENTQ_EMAIL }}
+         AGENTQ_PASSWORD: ${{ secrets.AGENTQ_PASSWORD }}
      - uses: actions/upload-artifact@v4
        if: ${{ !cancelled() }}
        with:
