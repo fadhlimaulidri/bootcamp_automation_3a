@@ -1086,6 +1086,22 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 }
 ```
 
+**Error Response (422) - Field Kosong:**
+> FE melakukan validasi required client-side dan **mencegah request dikirim** saat field kosong (lihat 5.8.3). Error berikut tetap ada di backend sebagai lapisan kedua.
+
+```json
+{
+  "success": false,
+  "errors": ["Current password is required"]
+}
+```
+```json
+{
+  "success": false,
+  "errors": ["New password is required"]
+}
+```
+
 ---
 
 #### POST /api/v1/auth/verify_email
@@ -1393,6 +1409,52 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 2. Karena pengecekan dilakukan di middleware pada semua request `POST /api/v1/auth/login`, counter menghitung **seluruh percobaan** (sukses + gagal); counter di-reset kembali oleh `reset_login_throttle` ketika login berhasil.
 3. Konfigurasi Flipper `disable_rate_limiter` dapat di-toggle per user dari halaman admin (User Management) untuk kebutuhan support/troubleshooting.
 
+---
+
+### 5.8 Password Policy
+
+Berlaku untuk seluruh alur yang membuat/mengubah password: **Registrasi (US-01)**, **Reset Password (US-06)**, dan **Change Password (US-07)**.
+
+#### 5.8.1 Aturan
+
+| # | Aturan |
+| :--- | :--- |
+| 1 | Minimum **8 karakter** |
+| 2 | Maksimum **50 karakter** |
+| 3 | Wajib mengandung minimal **1 huruf besar** (A–Z) |
+| 4 | Wajib mengandung minimal **1 huruf kecil** (a–z) |
+| 5 | Wajib mengandung minimal **1 angka** (0–9) |
+| 6 | Karakter khusus (mis. `!@#$%^&*`) **opsional / tidak wajib** |
+| 7 | Password & password confirmation harus sama |
+
+#### 5.8.2 Pesan Error
+
+| Kondisi | HTTP | Pesan |
+| :--- | :--- | :--- |
+| Panjang < 8 karakter | 422 | `"Password is too short (minimum is 8 characters)"` |
+| Panjang > 50 karakter | 422 | `"Password is too long (maximum is 50 characters)"` |
+| Tidak memenuhi kombinasi (huruf besar/kecil/angka) | 422 | `"Password is too weak"` |
+| Confirmation tidak sama | 422 | `"Password confirmation doesn't match"` |
+
+Response error dikembalikan dalam bentuk standar:
+```json
+{
+  "success": false,
+  "errors": ["Password is too weak"],
+  "error_code": null
+}
+```
+
+#### 5.8.3 Catatan
+
+1. Validasi harus diterapkan **konsisten** pada `create` (registrasi), `update` (reset & change password) — validasi `on: :create` saja tidak cukup karena change/reset password memanggil `update`.
+2. Change Password tetap memvalidasi **current password** terlebih dahulu, baru menerapkan policy pada password baru.
+3. **New password tidak wajib berbeda** dari current password — tidak ada penolakan bila password baru sama dengan current password.
+4. **Sesi / token tidak di-invalidate** setelah change password berhasil — access token (24 jam) dan refresh token (7 hari) yang sudah terbit **tetap aktif sampai expiry**; tidak ada auto logout. Mekanisme blacklist/revocation belum diterapkan (`blacklist_token` masih stub).
+5. **Validasi client-side (FE) pada Change Password**: jika **current password**, **new password**, atau **confirmation** kosong, FE menampilkan **validation error inline** dan **mencegah request dikirim** ke backend. Backend tetap menegakkan validasi sebagai lapisan kedua (defense in depth): `"Current password is required"` dan `"New password is required"`.
+6. **Reset form setelah sukses**: setelah change password berhasil, ketiga field (**current password**, **new password**, **confirmation**) **direset kosong**, tampilkan **notifikasi sukses**, dan user **tetap berada di halaman change password**.
+7. **Notifikasi mengikuti response API**: UI menampilkan **`message` dari API** untuk kasus sukses (`"Password changed successfully"`), dan menampilkan **daftar `errors` dari API** untuk kasus gagal (mis. `"Current password is incorrect"`). Tidak ada pesan kustom tambahan di FE.
+
 ## 6. Task Breakdown Berdasarkan User Story
 
 ### 6.1 User Story 1 - Registrasi via Email & Password
@@ -1401,7 +1463,7 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-01: Validasi field input registrasi sesuai form yang ada
 - BE-02: Mapping field `phone` ke `phone_number` pada registrasi
 - BE-03: Implementasi validasi email unik
-- BE-04: Implementasi validasi kekuatan password
+- BE-04: Implementasi validasi password policy (min 8 karakter + huruf besar, huruf kecil, angka — lihat 5.8)
 - BE-05: Integrasi pembuatan trial subscription otomatis dengan package default
 - BE-06: Generate JWT tokens (access & refresh) setelah registrasi
 - BE-07: Implementasi logging aktivitas registrasi
@@ -1415,6 +1477,7 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - FE-05: Implementasi informasi package trial yang didapat
 - FE-06: Penyimpanan token yang aman setelah registrasi
 - FE-07: Redirect ke dashboard/onboarding setelah registrasi berhasil
+- FE-08: Implementasi password strength indicator pada form registrasi
 
 #### QA Tasks (QA)
 - QA-01: Create test cases untuk registrasi via email & password
@@ -1431,12 +1494,12 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-14: Return data user dan subscription info
 
 #### Frontend Tasks (FE)
-- FE-08: Implementasi form login
-- FE-09: Integrasi dengan API login
-- FE-10: Penanganan error login
-- FE-11: Implementasi redirect berdasarkan role/subscription
-- FE-12: Implementasi remember me functionality
-- FE-13: Penyimpanan token yang aman
+- FE-09: Implementasi form login
+- FE-10: Integrasi dengan API login
+- FE-11: Penanganan error login
+- FE-12: Implementasi redirect berdasarkan role/subscription
+- FE-13: Implementasi remember me functionality
+- FE-14: Penyimpanan token yang aman
 
 #### QA Tasks (QA)
 - QA-03: Create test cases untuk login via email & password
@@ -1451,9 +1514,9 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-18: Implementasi blacklist untuk token yang di-revoke
 
 #### Frontend Tasks (FE)
-- FE-14: Implementasi otomatis refresh token sebelum expiry
-- FE-15: Implementasi handling token expired
-- FE-16: Implementasi logout saat refresh token invalid
+- FE-15: Implementasi otomatis refresh token sebelum expiry
+- FE-16: Implementasi handling token expired
+- FE-17: Implementasi logout saat refresh token invalid
 
 #### QA Tasks (QA)
 - QA-05: Create test cases untuk refresh token
@@ -1467,9 +1530,9 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-21: Implementasi token revocation (optional)
 
 #### Frontend Tasks (FE)
-- FE-17: Implementasi tombol/logout functionality
-- FE-18: Implementasi clear token storage
-- FE-19: Implementasi redirect ke halaman login
+- FE-18: Implementasi tombol/logout functionality
+- FE-19: Implementasi clear token storage
+- FE-20: Implementasi redirect ke halaman login
 
 #### QA Tasks (QA)
 - QA-07: Create test cases untuk logout
@@ -1485,9 +1548,9 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-26: Implementasi expiry untuk reset token
 
 #### Frontend Tasks (FE)
-- FE-20: Implementasi form forgot password
-- FE-21: Integrasi dengan API forgot password
-- FE-22: Implementasi pesan sukses generik
+- FE-21: Implementasi form forgot password
+- FE-22: Integrasi dengan API forgot password
+- FE-23: Implementasi pesan sukses generik
 
 #### QA Tasks (QA)
 - QA-09: Create test cases untuk forgot password
@@ -1500,13 +1563,13 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-28: Implementasi validasi reset token
 - BE-29: Implementasi update password baru
 - BE-30: Implementasi delete reset token setelah digunakan
-- BE-31: Implementasi validasi strength password baru
+- BE-31: Implementasi validasi password policy untuk password baru (lihat 5.8)
 
 #### Frontend Tasks (FE)
-- FE-23: Implementasi form reset password
-- FE-24: Integrasi dengan API reset password
-- FE-25: Implementasi validasi password confirmation
-- FE-26: Implementasi redirect ke login setelah berhasil
+- FE-24: Implementasi form reset password
+- FE-25: Integrasi dengan API reset password
+- FE-26: Implementasi validasi password confirmation
+- FE-27: Implementasi redirect ke login setelah berhasil
 
 #### QA Tasks (QA)
 - QA-11: Create test cases untuk reset password
@@ -1517,14 +1580,15 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 #### Backend Tasks (BE)
 - BE-32: Implementasi endpoint change password
 - BE-33: Implementasi validasi current password
-- BE-34: Implementasi update password baru
+- BE-34: Implementasi update password baru (terapkan password policy, lihat 5.8)
 - BE-35: Implementasi logging aktivitas ganti password
 
 #### Frontend Tasks (FE)
-- FE-27: Implementasi form change password
-- FE-28: Integrasi dengan API change password
-- FE-29: Implementasi validasi current password
-- FE-30: Implementasi notifikasi sukses/gagal
+- FE-28: Implementasi form change password
+- FE-29: Integrasi dengan API change password
+- FE-30: Implementasi validasi client-side (required current password, new password, confirmation) dan block pengiriman request saat field kosong
+- FE-31: Implementasi notifikasi sukses/gagal sesuai response API (`message`/`errors`) dan reset form (current/new/confirmation) setelah sukses
+- FE-32: Implementasi password strength indicator pada form change password
 
 #### QA Tasks (QA)
 - QA-13: Create test cases untuk change password
@@ -1539,10 +1603,10 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-39: Implementasi validasi format nomor telepon
 
 #### Frontend Tasks (FE)
-- FE-31: Implementasi form update profil
-- FE-32: Integrasi dengan API update profile
-- FE-33: Implementasi validasi format nomor telepon
-- FE-34: Implementasi notifikasi perubahan berhasil
+- FE-33: Implementasi form update profil
+- FE-34: Integrasi dengan API update profile
+- FE-35: Implementasi validasi format nomor telepon
+- FE-36: Implementasi notifikasi perubahan berhasil
 
 #### QA Tasks (QA)
 - QA-15: Create test cases untuk update profile
@@ -1562,12 +1626,12 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-48: Implementasi mekanisme sesi lama tidak berlaku setelah deaktivasi
 
 #### Frontend Tasks (FE)
-- FE-35: Implementasi halaman manajemen user untuk moderator
-- FE-36: Implementasi form edit user
-- FE-37: Implementasi tombol activate/deactivate user
-- FE-38: Implementasi bulk operations (bulk activate/deactivate)
-- FE-39: Implementasi handling pesan login "Account is suspended" (tetap di halaman login)
-- FE-40: Implementasi redirect ke login saat access/refresh token ditolak karena akun nonaktif
+- FE-37: Implementasi halaman manajemen user untuk moderator
+- FE-38: Implementasi form edit user
+- FE-39: Implementasi tombol activate/deactivate user
+- FE-40: Implementasi bulk operations (bulk activate/deactivate)
+- FE-41: Implementasi handling pesan login "Account is suspended" (tetap di halaman login)
+- FE-42: Implementasi redirect ke login saat access/refresh token ditolak karena akun nonaktif
 
 #### QA Tasks (QA)
 - QA-17: Create test cases untuk manajemen user
@@ -1585,11 +1649,11 @@ Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force
 - BE-54: Implementasi subscription analytics dan tracking
 
 #### Frontend Tasks (FE)
-- FE-41: Implementasi halaman manajemen package untuk moderator
-- FE-42: Implementasi form create/edit package
-- FE-43: Implementasi form assign package ke user
-- FE-44: Implementasi halaman manage subscription user
-- FE-45: Implementasi dashboard subscription analytics
+- FE-43: Implementasi halaman manajemen package untuk moderator
+- FE-44: Implementasi form create/edit package
+- FE-45: Implementasi form assign package ke user
+- FE-46: Implementasi halaman manage subscription user
+- FE-47: Implementasi dashboard subscription analytics
 
 #### QA Tasks (QA)
 - QA-20: Create test cases untuk manajemen package subscription
