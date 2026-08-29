@@ -182,7 +182,7 @@ CREATE TABLE users (
     country_code VARCHAR(10),
     whatsapp BOOLEAN DEFAULT false,
     whatsapp_no VARCHAR(255),
-    status INTEGER DEFAULT 0, -- 0: active, 1: inactive
+    status INTEGER DEFAULT 0, -- 0: active, 1: suspend
     role INTEGER DEFAULT 0,    -- 0: owner, 1: admin, 2: developer, 3: moderator
     balance DECIMAL(10,2) DEFAULT 0.0 NOT NULL,
     email_confirmed BOOLEAN DEFAULT false,
@@ -487,6 +487,8 @@ flowchart TD
     VerifyPassword[Verify Password]
     CheckPassword{Password Valid?}
     ReturnInvalidCreds[Return Invalid Credentials Error]
+    CheckStatus{Check Account Status}
+    ReturnSuspended[Return Account Suspended Error]
     GenerateJWT[Generate JWT Tokens]
     LogActivity[Log Activity]
     ReturnSuccess[Return Success Response]
@@ -500,7 +502,9 @@ flowchart TD
     CheckUser -- Yes --> VerifyPassword
     VerifyPassword --> CheckPassword
     CheckPassword -- No --> ReturnInvalidCreds
-    CheckPassword -- Yes --> GenerateJWT
+    CheckPassword -- Yes --> CheckStatus
+    CheckStatus -- Suspend --> ReturnSuspended
+    CheckStatus -- Active --> GenerateJWT
     GenerateJWT --> LogActivity
     LogActivity --> ReturnSuccess
     ReturnSuccess --> End
@@ -569,6 +573,7 @@ sequenceDiagram
     Backend->>Database: Find User by Email
     Database-->>Backend: User Data
     Backend->>Backend: Verify Password
+    Backend->>Backend: Check Account Status (active? & !suspended?)
     Backend->>Backend: Generate JWT Tokens
     Backend->>Database: Log Activity
     Backend-->>Frontend: Success Response
@@ -782,6 +787,27 @@ Login dengan email & password.
   "success": false,
   "errors": ["Invalid credentials"],
   "error_code": "AUTH_FAILED"
+}
+```
+
+**Error Response (401) - Account Suspended:**
+> Urutan validasi login: kredensial terlebih dahulu, lalu cek status akun, baru generate JWT.
+
+```json
+{
+  "success": false,
+  "errors": ["Account is suspended"],
+  "error_code": "AUTH_FAILED"
+}
+```
+
+**Error Response (429) - Rate Limited:**
+> Dijalankan oleh middleware Rack::Attack. Detail parameter lihat **5.7 Rate Limiting**.
+
+```json
+{
+  "error": "Too many login attempts, please try again in 15 minutes",
+  "status": 429
 }
 ```
 
@@ -1265,6 +1291,108 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 }
 ```
 
+---
+
+### 5.6 Behavior Design: Status User (Active & Suspend)
+
+#### 5.6.1 Definisi Status
+
+Pada User Management, status user direpresentasikan oleh field `active` (boolean). Akun yang tidak aktif disebut **Suspend**; tidak ada status **Inactive**.
+
+| Status | Nilai Field | Keterangan |
+| :--- | :--- | :--- |
+| **Active** | `active = true` | Akun aktif, akses penuh sesuai subscription |
+| **Suspend** | `active = false` | Akun dinonaktifkan oleh moderator |
+
+#### 5.6.2 Matriks Perilaku
+
+| Scenario | Active | Suspend |
+| :--- | :--- | :--- |
+| `POST /api/v1/auth/login` | 200, tokens dikembalikan | 401, `errors: ["Account is suspended"]` |
+| `POST /api/v1/auth/refresh` | 200, access token baru | 401, `error_code: REFRESH_FAILED` |
+| Endpoint terautentikasi (Bearer token) | 200 | 401, `error_code: AUTH_REQUIRED` / `ACCOUNT_SUSPENDED` |
+| `POST /api/v1/auth/forgot_password` | 200 generik + email terkirim | 200 generik (anti user enumeration) |
+| `POST /api/v1/auth/reset_password` | 200, password berubah, bisa login | 200, password berubah **tetapi tetap tidak bisa login** |
+| `GET /api/v1/auth/verify_token` | `valid: true` | `valid: false` / 401 |
+| Background jobs (broadcast, sync) | Dijalankan | Di-skip / dihentikan |
+| Subscription | Normal sesuai period | Tetap berjalan, tapi fitur tidak dapat diakses |
+
+#### 5.6.3 Mekanisme Enforce
+
+1. `current_user` di-resolve dari JWT pada **setiap request**, lalu status user selalu dicek ulang (bukan hanya validitas token).
+2. Akses hanya dilanjutkan jika `can_access_api?` bernilai `true` (`active? && !suspended?`).
+3. **Refresh token** hanya menghasilkan access token baru jika user masih berstatus `active`.
+4. **Login** memvalidasi kredensial terlebih dahulu, lalu mengecek status user:
+   * `User.authenticate_for_jwt` mengembalikan error `"Account is suspended"` bila `suspended?`.
+5. **Background job** mengecek status user sebelum eksekusi; job atas nama user nonaktif di-skip.
+6. **Deaktivasi** (oleh moderator) langsung membatalkan sesi user: seluruh access/refresh token yang beredar menjadi tidak berlaku karena status dicek per-request.
+7. **Reaktivasi** (restore) hanya mengubah `active = true`; tidak ada data yang dihapus dan kredensial tetap sama, tetapi sesi lama tetap invalid (wajib login ulang).
+
+#### 5.6.4 Logging / Audit
+
+| Aksi | Event | Metadata |
+| :--- | :--- | :--- |
+| Moderator menonaktifkan user | `user_deactivated` | `{ active: false }`, actor, target_user, timestamp |
+| Moderator mengaktifkan kembali user | `user_activated` | `{ active: true }`, actor, target_user, timestamp |
+
+#### 5.6.5 Batasan / Catatan
+
+* Email verifikasi (`verify_email`) dan `resend_verification` tidak boleh mengubah status `active` (tidak mereaktivasi akun yang di-suspend).
+* Pesan error login untuk akun nonaktif harus konsisten dengan test case US-02 (`"Account is suspended"`, HTTP 401).
+
+---
+
+### 5.7 Rate Limiting (Login & Forgot Password)
+
+Rate limiting diterapkan di middleware `Rack::Attack` untuk mencegah brute force.
+
+#### 5.7.1 Parameter Login
+
+| Parameter | Nilai |
+| :--- | :--- |
+| Endpoint | `POST /api/v1/auth/login` |
+| Metode | `Rack::Attack::Allow2Ban` (blocklist) |
+| Discriminator (key) | `IP:email` (per IP + per akun, user lain di IP yang sama tidak ter-block) |
+| Maksimal percobaan (`maxretry`) | **5** dalam **15 menit** |
+| Durasi pemblokiran (`bantime`) | **15 menit** |
+| Reset counter | Counter di-reset saat login **berhasil** (per `IP:email`) |
+| Pengecualian | User dengan Flipper flag `disable_rate_limiter` di-bypass |
+
+**Response saat ter-block (429):**
+```json
+{
+  "error": "Too many login attempts, please try again in 15 minutes",
+  "status": 429
+}
+```
+* Response header menyertakan `Retry-After: 900` (detik).
+
+#### 5.7.2 Parameter Forgot Password
+
+| Parameter | Nilai |
+| :--- | :--- |
+| Endpoint | `POST /api/v1/auth/forgot_password` |
+| Metode | `Rack::Attack::Allow2Ban` (blocklist) |
+| Discriminator (key) | `IP:email` |
+| Maksimal percobaan (`maxretry`) | **2** dalam **15 menit** |
+| Durasi pemblokiran (`bantime`) | **15 menit** |
+| Pengecualian | User dengan Flipper flag `disable_rate_limiter` di-bypass |
+
+**Response saat ter-block (429):**
+```json
+{
+  "error": "Too many password reset attempts, please try again in 15 minutes",
+  "status": 429
+}
+```
+* Response header menyertakan `Retry-After: 900` (detik).
+
+#### 5.7.3 Catatan Implementasi
+
+1. Discriminator dibuat dari **kombinasi IP + email** (bukan hanya IP) sehingga percobaan login gagal satu akun tidak memblokir user lain di IP yang sama.
+2. Karena pengecekan dilakukan di middleware pada semua request `POST /api/v1/auth/login`, counter menghitung **seluruh percobaan** (sukses + gagal); counter di-reset kembali oleh `reset_login_throttle` ketika login berhasil.
+3. Konfigurasi Flipper `disable_rate_limiter` dapat di-toggle per user dari halaman admin (User Management) untuk kebutuhan support/troubleshooting.
+
 ## 6. Task Breakdown Berdasarkan User Story
 
 ### 6.1 User Story 1 - Registrasi via Email & Password
@@ -1298,7 +1426,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 - BE-09: Implementasi validasi kredensial login
 - BE-10: Generate JWT tokens untuk login berhasil
 - BE-11: Implementasi logging aktivitas login
-- BE-12: Implementasi rate limiting untuk percobaan login
+- BE-12: Implementasi rate limiting untuk percobaan login (Rack::Attack Allow2Ban, max 5 percobaan / 15 menit, block 15 menit, key `IP:email`)
 - BE-13: Implementasi pengecekan status user (active/suspended)
 - BE-14: Return data user dan subscription info
 
@@ -1428,37 +1556,44 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 - BE-42: Implementasi user CRUD operations (view, edit, activate, deactivate)
 - BE-43: Implementasi bulk user operations
 - BE-44: Implementasi logging aktivitas user management
+- BE-45: Implementasi enforce status user pada seluruh request (cek `active` per-request)
+- BE-46: Implementasi penolakan refresh token untuk user suspend
+- BE-47: Implementasi skip background jobs untuk user suspend
+- BE-48: Implementasi mekanisme sesi lama tidak berlaku setelah deaktivasi
 
 #### Frontend Tasks (FE)
 - FE-35: Implementasi halaman manajemen user untuk moderator
 - FE-36: Implementasi form edit user
 - FE-37: Implementasi tombol activate/deactivate user
 - FE-38: Implementasi bulk operations (bulk activate/deactivate)
+- FE-39: Implementasi handling pesan login "Account is suspended" (tetap di halaman login)
+- FE-40: Implementasi redirect ke login saat access/refresh token ditolak karena akun nonaktif
 
 #### QA Tasks (QA)
 - QA-17: Create test cases untuk manajemen user
 - QA-18: Test manajemen user feature
+- QA-19: Test behavior suspend (login, refresh, akses API, background job, restore)
 
 ### 6.10 User Story 10 - Manajemen Package Subscription
 
 #### Backend Tasks (BE)
-- BE-45: Implementasi API endpoints untuk package management
-- BE-46: Implementasi validasi package configuration
-- BE-47: Implementasi package CRUD operations (view, create, edit, delete)
-- BE-48: Implementasi subscription management (assign, upgrade, downgrade, cancel)
-- BE-49: Implementasi auto-assignment package saat registrasi
-- BE-50: Implementasi subscription analytics dan tracking
+- BE-49: Implementasi API endpoints untuk package management
+- BE-50: Implementasi validasi package configuration
+- BE-51: Implementasi package CRUD operations (view, create, edit, delete)
+- BE-52: Implementasi subscription management (assign, upgrade, downgrade, cancel)
+- BE-53: Implementasi auto-assignment package saat registrasi
+- BE-54: Implementasi subscription analytics dan tracking
 
 #### Frontend Tasks (FE)
-- FE-39: Implementasi halaman manajemen package untuk moderator
-- FE-40: Implementasi form create/edit package
-- FE-41: Implementasi form assign package ke user
-- FE-42: Implementasi halaman manage subscription user
-- FE-43: Implementasi dashboard subscription analytics
+- FE-41: Implementasi halaman manajemen package untuk moderator
+- FE-42: Implementasi form create/edit package
+- FE-43: Implementasi form assign package ke user
+- FE-44: Implementasi halaman manage subscription user
+- FE-45: Implementasi dashboard subscription analytics
 
 #### QA Tasks (QA)
-- QA-19: Create test cases untuk manajemen package subscription
-- QA-20: Test manajemen package subscription feature
+- QA-20: Create test cases untuk manajemen package subscription
+- QA-21: Test manajemen package subscription feature
 
 ## 7. Risiko, Asumsi, Pertanyaan Terbuka
 
