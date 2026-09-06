@@ -214,7 +214,7 @@ CREATE TABLE users (
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_status ON users(status);
 CREATE INDEX idx_users_role ON users(role);
-CREATE INDEX idx_users_phone_number ON users(phone_number);
+CREATE INDEX idx_users_phone_number ON users(phone_number); -- non-unique: duplikat nomor diperbolehkan (keputusan bisnis)
 CREATE INDEX idx_users_country_code ON users(country_code);
 CREATE INDEX idx_users_google_id ON users(google_id);
 CREATE INDEX idx_users_reset_password_token ON users(reset_password_token);
@@ -831,6 +831,28 @@ Register a new user.
 }
 ```
 
+**Field Requirement (Mandatory vs Optional):**
+
+| Field | Wajib? | Keterangan |
+| :--- | :--- | :--- |
+| `email` | **Wajib** | Alamat email, harus unik |
+| `name` | **Wajib** | Nama lengkap; maksimum **100 karakter**, tanpa batasan jenis karakter |
+| `password` | **Wajib** | Memenuhi password policy (8–50 karakter, lihat 5.8) |
+| `password_confirmation` | **Wajib** | Harus sama dengan `password` |
+| `phone_number` | Opsional | Nomor telepon; jika diisi wajib format E.164 (mis. `+628123456789`); dapat dikirim sebagai `phone` |
+| `country_code` | Opsional | Kode dialing negara (mis. `+62`) |
+| `country` | Opsional | Nama negara |
+
+> Jika field wajib kosong/tidak dikirim → **HTTP 422**, `error_code: REGISTRATION_FAILED`, `errors` berisi pesan per field (mis. `"Email can't be blank"`, `"Password can't be blank"`, `"Name can't be blank"`).
+>
+> **Validasi `name`:** maksimum 100 karakter (tidak ada batasan jenis karakter). Lebih dari 100 karakter → **HTTP 422**, `errors: ["Name is too long (maximum is 100 characters)"]`. Aturan yang sama berlaku saat update profil.
+>
+> **Validasi `phone_number` (berlaku juga di Register):** format E.164 — awalan `+` opsional, digit pertama `1–9`, total hingga 15 digit (regex `\A\+?[1-9]\d{1,14}\z`). Jika diisi namun tidak sesuai format → **HTTP 422**, `errors: ["Phone number is invalid"]`.
+>
+> **Uniqueness `phone_number` (keputusan bisnis):** `phone_number` **TIDAK unik — duplikat diperbolehkan**. Satu nomor telepon dapat dipakai oleh lebih dari satu akun. Sesuai schema, index `idx_users_phone_number` sengaja **non-unique** (lihat 2.2). Tidak ada validasi `uniqueness` pada `phone_number`.
+>
+> **Catatan `company_name`:** nama perusahaan **tidak disimpan di tabel `users`** (tidak ada kolom `company_name` — lihat 2.2). Company dimodelkan sebagai entitas terpisah (`companies` + join `user_companies`) yang berada **di luar scope RFC ini**. Endpoint `/register` **tidak menerima/memetakan** `company_name`; jika form registrasi menangkapnya, penanganannya dilakukan di proses lain (mis. onboarding/PRD terpisah).
+
 **Success Response (201):**
 ```json
 {
@@ -1355,6 +1377,13 @@ Pada User Management, status user direpresentasikan oleh field `active` (boolean
 
 * Email verifikasi (`verify_email`) dan `resend_verification` tidak boleh mengubah status `active` (tidak mereaktivasi akun yang di-suspend).
 * Pesan error login untuk akun nonaktif harus konsisten dengan test case US-02 (`"Account is suspended"`, HTTP 401).
+
+#### 5.6.6 Penghapusan Akun & Reuse Email
+
+* **Hard delete (penghapusan baris) tidak termasuk scope batch ini** — tidak ada kolom `deleted_at`/soft-delete pada tabel `users` (lihat 2.2). "Penghapusan" akun dalam konteks ini direpresentasikan oleh **Suspend** (`active = false`).
+* **Email bersifat unik dan tetap reserved**, termasuk untuk akun berstatus **Suspend**/nonaktif.
+* Registrasi ulang dengan email yang sudah dipakai akun nonaktif **ditolak** → HTTP 422, `errors: ["Email has already been taken"]`, `error_code: REGISTRATION_FAILED`.
+* Hak user untuk menghapus akunnya sendiri (account deletion / GDPR) akan dijabarkan di PRD tersendiri (di luar scope registrasi & autentikasi ini).
 
 ---
 
