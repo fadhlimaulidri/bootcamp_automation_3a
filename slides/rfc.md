@@ -835,7 +835,7 @@ Register a new user.
 
 | Field | Wajib? | Keterangan |
 | :--- | :--- | :--- |
-| `email` | **Wajib** | Alamat email, harus unik |
+| `email` | **Wajib** | Alamat email; harus format valid, unik, dan **case-insensitive** (lihat 5.9) |
 | `name` | **Wajib** | Nama lengkap; maksimum **100 karakter**, tanpa batasan jenis karakter |
 | `password` | **Wajib** | Memenuhi password policy (8–50 karakter, lihat 5.8) |
 | `password_confirmation` | **Wajib** | Harus sama dengan `password` |
@@ -852,6 +852,8 @@ Register a new user.
 > **Uniqueness `phone_number` (keputusan bisnis):** `phone_number` **TIDAK unik — duplikat diperbolehkan**. Satu nomor telepon dapat dipakai oleh lebih dari satu akun. Sesuai schema, index `idx_users_phone_number` sengaja **non-unique** (lihat 2.2). Tidak ada validasi `uniqueness` pada `phone_number`.
 >
 > **Catatan `company_name`:** nama perusahaan **tidak disimpan di tabel `users`** (tidak ada kolom `company_name` — lihat 2.2). Company dimodelkan sebagai entitas terpisah (`companies` + join `user_companies`) yang berada **di luar scope RFC ini**. Endpoint `/register` **tidak menerima/memetakan** `company_name`; jika form registrasi menangkapnya, penanganannya dilakukan di proses lain (mis. onboarding/PRD terpisah).
+>
+> **Validasi format & case-insensitive email:** email divalidasi format di FE **dan** BE, serta dinormalisasi ke lowercase — lihat **5.9 Validasi Email**.
 
 **Success Response (201):**
 ```json
@@ -1040,6 +1042,14 @@ Request password reset.
 }
 ```
 
+**Catatan:**
+
+> * Respons **wajib identik** untuk email terdaftar maupun tidak terdaftar (anti user enumeration). Perbedaan status (user ditemukan / tidak) hanya dicatat di **log & metrik internal**, tidak pernah dibedakan di respons API maupun UI.
+> * **Jika pengiriman email gagal** (email service bermasalah / `deliver_later` error), respons ke user **tetap generik** (HTTP 200). Kegagalan di-log/di-alert dan di-retry internal; UI **tidak** menampilkan pesan khusus kegagalan email.
+> * `email` dinormalisasi ke **lowercase** sebelum lookup (lihat 5.9).
+> * Token reset berlaku **2 jam** dan hanya **satu token aktif** per user (lihat 5.10).
+> * Rate limit: **2 request / 15 menit per `IP:email`** → HTTP 429 + `Retry-After: 900` (lihat 5.7.2).
+
 ---
 
 #### POST /api/v1/auth/reset_password
@@ -1070,6 +1080,12 @@ Reset password with token.
   "errors": ["Reset token is invalid or has expired"]
 }
 ```
+
+**Catatan:**
+
+> * Token valid hanya **2 jam** sejak diterbitkan (divalidasi via `reset_password_sent_at`).
+> * Token bersifat **single active**: permintaan `forgot_password` baru **menimpa** token lama, sehingga token/link sebelumnya **langsung tidak berlaku** (lihat 5.10).
+> * Setelah reset berhasil, token dihapus dan **tidak dapat dipakai ulang**.
 
 ---
 
@@ -1484,6 +1500,64 @@ Response error dikembalikan dalam bentuk standar:
 6. **Reset form setelah sukses**: setelah change password berhasil, ketiga field (**current password**, **new password**, **confirmation**) **direset kosong**, tampilkan **notifikasi sukses**, dan user **tetap berada di halaman change password**.
 7. **Notifikasi mengikuti response API**: UI menampilkan **`message` dari API** untuk kasus sukses (`"Password changed successfully"`), dan menampilkan **daftar `errors` dari API** untuk kasus gagal (mis. `"Current password is incorrect"`). Tidak ada pesan kustom tambahan di FE.
 
+---
+
+### 5.9 Validasi Email (Format & Case-Insensitive)
+
+Berlaku untuk seluruh alur yang menerima input email: **Registrasi (US-01)**, **Login (US-02)**, dan **Forgot Password (US-05)**.
+
+#### 5.9.1 Validasi Format
+
+| Lapisan | Tanggung Jawab |
+| :--- | :--- |
+| **Frontend (FE)** | Validasi format lebih dulu (client-side) agar user mendapat feedback instan sebelum request dikirim |
+| **Backend (BE)** | Tetap memvalidasi format sebagai lapisan kedua (defense in depth), sehingga pemanggilan API langsung tanpa melalui FE juga tetap ditolak |
+
+* Email berformat tidak valid **ditolak oleh FE dan BE** (keduanya).
+* Di BE, format tidak valid → **HTTP 422**, `error_code: REGISTRATION_FAILED`, `errors: ["Email is invalid"]`.
+* Validasi format mengikuti `URI::MailTo::EMAIL_REGEXP` (contoh valid: `user@example.com`).
+
+#### 5.9.2 Case-Insensitive
+
+* Email bersifat **case-insensitive**: `Nanda@gmail.com` dan `nanda@gmail.com` dianggap **sama**.
+* Seluruh email dinormalisasi ke **lowercase** sebelum disimpan dan dicari.
+* Keunikan email ditegakkan di level database dengan **unique index case-insensitive**, sehingga dua akun dengan email yang sama namun berbeda kapitalisasi **tidak dapat dibuat**.
+* Pesan error untuk email yang sudah terdaftar tetap: `"Email has already been taken"` → **HTTP 422**, `error_code: REGISTRATION_FAILED`.
+
+Perubahan schema yang dibutuhkan (lihat 2.2):
+
+```sql
+-- Ganti unique index case-sensitive dengan expression index case-insensitive
+DROP INDEX idx_users_email_unique;
+CREATE UNIQUE INDEX idx_users_email_unique ON users(LOWER(email));
+```
+
+> Normalisasi lowercase di application layer **harus** disertai index case-insensitive di database agar konsisten (mencegah duplikat beda kapitalisasi).
+
+---
+
+### 5.10 Kebijakan Reset Password Token
+
+#### 5.10.1 Masa Berlaku (TTL)
+
+* Reset token berlaku **2 jam** sejak diterbitkan, divalidasi melalui `reset_password_sent_at`.
+* Melewati 2 jam → **HTTP 422**, `errors: ["Reset token is invalid or has expired"]`.
+* Setelah reset password **berhasil**, `reset_password_token` dan `reset_password_sent_at` **dinull-kan** sehingga token tidak dapat dipakai ulang.
+
+#### 5.10.2 Permintaan Berulang (Single Active Token)
+
+* Backend menyimpan **satu** reset token aktif per user.
+* Setiap permintaan `forgot_password` baru **menimpa** token lama. Token/link sebelumnya **langsung tidak berlaku** (tidak menunggu masa 2 jam selesai).
+* Tidak ada penyimpanan multi-token dan tidak ada token yang dipertahankan sampai TTL habis.
+
+#### 5.10.3 Kegagalan Email Service
+
+* Jika pengiriman email reset **gagal** (`deliver_later` error), respons ke user **tetap generik** (HTTP 200) — bukan 500.
+* Kegagalan dicatat / di-alert (lihat 8.2 warning "Failed Password Reset") dan di-retry internal; UI tidak menampilkan pesan khusus.
+* Tujuan: mencegah user enumeration sekaligus menjaga konsistensi UX.
+
+---
+
 ## 6. Task Breakdown Berdasarkan User Story
 
 ### 6.1 User Story 1 - Registrasi via Email & Password
@@ -1491,16 +1565,17 @@ Response error dikembalikan dalam bentuk standar:
 #### Backend Tasks (BE)
 - BE-01: Validasi field input registrasi sesuai form yang ada
 - BE-02: Mapping field `phone` ke `phone_number` pada registrasi
-- BE-03: Implementasi validasi email unik
+- BE-03: Implementasi validasi email unik, validasi format (`URI::MailTo::EMAIL_REGEXP`), dan normalisasi lowercase (case-insensitive) — lihat 5.9
 - BE-04: Implementasi validasi password policy (min 8 karakter + huruf besar, huruf kecil, angka — lihat 5.8)
 - BE-05: Integrasi pembuatan trial subscription otomatis dengan package default
 - BE-06: Generate JWT tokens (access & refresh) setelah registrasi
 - BE-07: Implementasi logging aktivitas registrasi
 - BE-08: Implementasi validasi package availability untuk trial
+- BE-55: Implementasi unique index case-insensitive email (`LOWER(email)`) — lihat 5.9.2
 
 #### Frontend Tasks (FE)
 - FE-01: Implementasi form registrasi sesuai existing form
-- FE-02: Validasi input di sisi client
+- FE-02: Validasi input di sisi client termasuk validasi format email
 - FE-03: Integrasi dengan API registrasi
 - FE-04: Penanganan error dan pesan validasi
 - FE-05: Implementasi informasi package trial yang didapat
@@ -1573,8 +1648,9 @@ Response error dikembalikan dalam bentuk standar:
 - BE-22: Implementasi endpoint forgot password
 - BE-23: Implementasi generate reset password token
 - BE-24: Implementasi pengiriman email reset password
-- BE-25: Implementasi response generik untuk mencegah user enumeration
-- BE-26: Implementasi expiry untuk reset token
+- BE-25: Implementasi response generik (identik untuk email terdaftar maupun tidak terdaftar) untuk mencegah user enumeration — lihat 5.4 & 5.10
+- BE-26: Implementasi reset token TTL **2 jam** dan **satu token aktif** (permintaan forgot password baru menimpa token lama) — lihat 5.10
+- BE-56: Implementasi handling kegagalan email service (rescue agar tetap respons generik, log/alert & retry) — lihat 5.10.3
 
 #### Frontend Tasks (FE)
 - FE-21: Implementasi form forgot password
@@ -1731,14 +1807,14 @@ Response error dikembalikan dalam bentuk standar:
 
 ### 7.3 Pertanyaan Terbuka
 
+> **Sudah terjawab:** rate limiting forgot password (lihat 5.7.2) dan TTL reset password token 2 jam + single active token (lihat 5.10), serta validasi email format & case-insensitive (lihat 5.9).
+
 1. **Pertanyaan Teknis**
    - Apakah kita perlu implementasi token blacklist untuk logout?
    - Bagaimana handling token refresh saat user aktif di multiple device?
-   - Apakah perlu ada rate limiting untuk forgot password request?
 
 2. **Pertanyaan Bisnis**
    - Apakah perlu ada email verification setelah registrasi?
-   - Berapa lama expiry untuk reset password token?
    - Apakah perlu ada limit untuk concurrent login per user?
 
 3. **Pertanyaan Operasional**
