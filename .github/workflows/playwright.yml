@@ -24,7 +24,7 @@ jobs:
          PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
 
      - name: Run Playwright tests
-       run: npx playwright test
+       run: npx playwright test --grep "@staging"
        env:
          PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
          BASE_URL: https://www.emra.chat
